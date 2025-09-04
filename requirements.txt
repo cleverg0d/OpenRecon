@@ -1,8 +1,11 @@
-httpx
-rich
 aiohttp
-aiodns
-dnspython
+aiofiles
 beautifulsoup4
-tldextract
+dnspython
+ipwhois
 tabulate
+termcolor
+requests
+rich
+whois
+urllib3
