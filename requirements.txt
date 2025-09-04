@@ -1,0 +1,8 @@
+httpx
+rich
+aiohttp
+aiodns
+dnspython
+beautifulsoup4
+tldextract
+tabulate
