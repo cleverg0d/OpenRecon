@@ -42,12 +42,12 @@ Y88b. .d88P888 d88PY8b.    888  888888  T88b Y8b.    Y88b.   Y88..88P888  888
 
 ### Recommended (via `pipx`)
 ```bash
-pipx install git+https://github.com/clevergod/openrecon.git
+pipx install git+https://github.com/cleverg0d/OpenRecon.git
 ```
 
 ### Manual
 ```bash
-git clone https://github.com/clevergod/openrecon.git
+git clone https://github.com/cleverg0d/OpenRecon.git
 cd openrecon
 pip install -r requirements.txt
 ```
