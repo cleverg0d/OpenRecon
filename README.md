@@ -71,6 +71,10 @@ python3 openrecon.py -d example.com
 -h, --help                Show this message
 ```
 
+For upgrading use
+```
+pipx upgrade openrecon
+```
 ---
 
 ## 📦 Output
