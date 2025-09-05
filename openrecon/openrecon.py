@@ -23,8 +23,30 @@ import subprocess
 from ipwhois import IPWhois
 import html
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+console = Console()
+
+# -----------------
+# Tuning & defaults
+# -----------------
+DEFAULT_PORTS = [80, 443, 40443, 8080, 8443, 8090, 445, 22, 21, 3389, 5985]
+FALLBACK_SUBS = ['www', 'mail', 'vpn', 'adfs', 'telbot', 'drive', 'api', 'dev', 'test', 'sip', 'ftp', 'autodiscover', 'crm', 'vpn2', 'doc', 'owa', 'portal', 'remote', 'trade', 'admin', 'cloud']
+
+# Timeouts / concurrency
+PORT_CONNECT_TIMEOUT = 0.18
+TLS_HANDSHAKE_TIMEOUT = 0.7
+HTTP_TIMEOUT = 2.5
+WHOIS_TIMEOUT = 8
+RESOLVE_THREADS = 200
+PORT_WORKERS_FULL = 300
+PORT_WORKERS_DEFAULT = 80
+
+# --------------
+# Fancy banner
+# --------------
+
 def print_banner():
-    print(r"""
+    console.print("""
  .d88888b.                         8888888b.
 d88P" "Y88b                        888   Y88b
 888     888                        888    888
@@ -39,61 +61,66 @@ Y88b. .d88P888 d88PY8b.    888  888888  T88b Y8b.    Y88b.   Y88..88P888  888
 ░█▀▄░█░█░░░█▀▀░█░░░█▀▀░█░█░█▀▀░█▀▄░█▀▀░█▀█░█▀▄
 ░█▀▄░░█░░░░█░░░█░░░█▀▀░▀▄▀░█▀▀░█▀▄░█░█░█░█░█░█
 ░▀▀░░░▀░░░░▀▀▀░▀▀▀░▀▀▀░░▀░░▀▀▀░▀░▀░▀▀▀░▀▀▀░▀▀░
-""")
+""", style="bold white")
 
-# Call banner at startup
-print_banner()
+# -----------------
+# Helpers
+# -----------------
 
-parser = argparse.ArgumentParser(
-    description="OpenRecon — Asynchronous Reconnaissance Tool for Domain Enumeration"
-)
-parser.add_argument("-d", "--domain", required=True, help="Target domain")
-parser.add_argument("-w", "--wordlist", help="Path to subdomain wordlist")
-parser.add_argument("-t", "--threads", type=int, default=20, help="Number of threads (default: 20)")
-parser.add_argument("-f", "--full", action="store_true", help="Enable full scan mode")
-parser.add_argument("-o", "--output", help="Output file name (CSV format)")
-parser.add_argument("--debug", action="store_true", help="Enable debug output")
-args = parser.parse_args()
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-console = Console()
-
-DEFAULT_PORTS = [80, 443, 40443, 8080, 8443, 8090, 445, 22, 21, 3389, 5985]
-FALLBACK_SUBS = ['www', 'mail', 'vpn', 'adfs', 'telbot', 'drive', 'api', 'dev', 'test', 'sip', 'ftp', 'autodiscover', 'crm', 'vpn2', 'doc', 'owa', 'portal', 'remote', 'trade', 'admin', 'cloud']
-
-
-def get_hosting_info(domain):
+def get_hosting_info(domain: str):
     try:
         ip = socket.gethostbyname(domain)
         whois_ip = IPWhois(ip)
         data = whois_ip.lookup_rdap()
-        return ip, data.get('network', {}).get('name', '-'), f"{data.get('asn_country_code', '-')}, {data.get('asn_description', '-')}"
-    except:
+        org = data.get('network', {}).get('name', '-')
+        loc = f"{data.get('asn_country_code', '-')}, {data.get('asn_description', '-')}"
+        return ip, org, loc
+    except Exception:
         return '-', '-', '-'
 
 
-def get_whois_info(domain):
+def _whois_fetch(domain: str):
+    return whois.whois(domain)
+
+
+def get_whois_info(domain: str) -> dict:
+    defaults = {
+        'domain': domain,
+        'org': '-', 'name': '-', 'emails': '-', 'registrar': '-', 'status': '-',
+        'created': '-', 'expires': '-', 'updated': '-', 'name_servers': '-', 'dnssec': '-',
+        'country': '-', 'city': '-', 'state': '-', 'postal': '-',
+    }
     try:
-        w = whois.whois(domain)
-        return {k: (v if v else '-') for k, v in {
-            'domain': w.domain_name,
-            'org': w.org,
-            'name': w.name,
-            'emails': w.emails,
-            'registrar': w.registrar,
-            'status': w.status,
-            'created': w.creation_date,
-            'expires': w.expiration_date,
-            'updated': w.updated_date,
-            'name_servers': w.name_servers,
-            'dnssec': w.dnssec,
-            'country': w.country,
-            'city': w.city,
-            'state': w.state,
-            'postal': w.registrant_postal_code
-        }.items()}
-    except:
-        return {k: '-' for k in ['domain', 'org', 'name', 'emails', 'registrar', 'status', 'created', 'expires', 'updated', 'name_servers', 'dnssec', 'country', 'city', 'state', 'postal']}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_whois_fetch, domain)
+            w = fut.result(timeout=WHOIS_TIMEOUT)
+
+        def _fmt(v):
+            if v is None:
+                return '-'
+            if isinstance(v, (list, tuple, set)):
+                return str(sorted(v))
+            return str(v)
+
+        return {
+            'domain': _fmt(getattr(w, 'domain_name', domain)),
+            'org': _fmt(getattr(w, 'org', '-')),
+            'name': _fmt(getattr(w, 'name', '-')),
+            'emails': _fmt(getattr(w, 'emails', '-')),
+            'registrar': _fmt(getattr(w, 'registrar', '-')),
+            'status': _fmt(getattr(w, 'status', '-')),
+            'created': _fmt(getattr(w, 'creation_date', '-')),
+            'expires': _fmt(getattr(w, 'expiration_date', '-')),
+            'updated': _fmt(getattr(w, 'updated_date', '-')),
+            'name_servers': _fmt(getattr(w, 'name_servers', '-')),
+            'dnssec': _fmt(getattr(w, 'dnssec', '-')),
+            'country': _fmt(getattr(w, 'country', '-')),
+            'city': _fmt(getattr(w, 'city', '-')),
+            'state': _fmt(getattr(w, 'state', '-')),
+            'postal': _fmt(getattr(w, 'registrant_postal_code', '-')),
+        }
+    except Exception:
+        return defaults
 
 
 def batch_lines(file_path, batch_size=5000):
@@ -118,14 +145,13 @@ def get_crtsh_subdomains(domain):
         if resp.status_code != 200:
             return []
         data = resp.json()
-        subdomains = set()
+        subs = set()
         for item in data:
-            name = item['name_value'].split('\n')
-            for n in name:
+            for n in item['name_value'].split('\n'):
                 if domain in n:
-                    subdomains.add(n.strip())
-        return list(subdomains)
-    except:
+                    subs.add(n.strip())
+        return list(subs)
+    except Exception:
         return []
 
 
@@ -138,82 +164,102 @@ def get_chaos_subdomains(domain):
         if key:
             cmd.insert(1, f"-key={key}")
         result = subprocess.run(cmd, capture_output=True, text=True)
-        return [line.strip() for line in result.stdout.splitlines() if line.strip() and not line.startswith("[")]
-    except:
+        return [l.strip() for l in result.stdout.splitlines() if l.strip() and not l.startswith("[")]
+    except Exception:
         return []
 
 
-def resolve(domain):
+def resolve(domain: str):
     try:
         return socket.gethostbyname(domain)
-    except:
+    except Exception:
         return None
 
 
-def scan_ports(ip, full=False):
-    open_ports = []
-    ports = range(1, 65536) if full else DEFAULT_PORTS
-    for port in ports:
-        s = socket.socket()
-        s.settimeout(0.3)
-        try:
-            s.connect((ip, port))
+# --------- Fast port scan (concurrent) ---------
+
+def _probe_port(ip: str, port: int) -> str | None:
+    try:
+        with socket.create_connection((ip, port), PORT_CONNECT_TIMEOUT):
+            if port == 445:
+                return "📁"
+            if port in (22, 3389, 5985):
+                return "🖥️"
+            if port == 21:
+                return "📂"
+            if port == 80:
+                return "80🔓"
             if port == 443:
                 try:
-                    context = ssl.create_default_context()
-                    with context.wrap_socket(socket.socket(), server_hostname=ip) as ssock:
-                        ssock.settimeout(1)
-                        ssock.connect((ip, port))
-                        cert = ssock.getpeercert()
-                        ssl.match_hostname(cert, ip)
-                        open_ports.append(f"{port}🔒")
-                except ssl.CertificateError:
-                    open_ports.append(f"{port}🔓")
-                except:
-                    open_ports.append(f"{port}⚠️")
-            elif port == 80:
-                open_ports.append(f"{port}🔓")
-            elif port == 445:
-                open_ports.append("📁")
-            elif port in [22, 3389, 5985]:
-                open_ports.append("🖥️")
-            elif port == 21:
-                open_ports.append("📂")
-            else:
-                open_ports.append(str(port))
-        except:
-            pass
-        s.close()
-    return open_ports
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    with ctx.wrap_socket(socket.socket(), server_hostname=ip) as ss:
+                        ss.settimeout(TLS_HANDSHAKE_TIMEOUT)
+                        ss.connect((ip, 443))
+                        _ = ss.getpeercert(False)
+                    return "443🔒"
+                except ssl.SSLError:
+                    return "443🔓"
+                except Exception:
+                    return "443⚠️"
+            return str(port)
+    except Exception:
+        return None
 
 
-def check_alive(domain):
+def scan_ports(ip: str, full: bool = False) -> list[str]:
+    ports = (range(1, 65536) if full else DEFAULT_PORTS)
+    workers = PORT_WORKERS_FULL if full else PORT_WORKERS_DEFAULT
+    out = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_probe_port, ip, p): p for p in ports}
+        for fut in concurrent.futures.as_completed(futs):
+            res = fut.result()
+            if res:
+                out.append(res)
+    def _key(v: str):
+        try:
+            return (0, int(''.join(ch for ch in v if ch.isdigit())))
+        except ValueError:
+            return (1, v)
+    return sorted(out, key=_key)
+
+
+def check_alive(domain: str) -> str:
     try:
-        resp = requests.get(f"https://{domain}", timeout=3, verify=False)
-        if resp.status_code in [200, 301, 302]:
+        r = requests.get(f"https://{domain}", timeout=HTTP_TIMEOUT, verify=False)
+        if r.status_code in (200, 301, 302, 403):
             return '✅'
-        elif resp.status_code >= 500:
+        if r.status_code >= 500:
             return '❌'
-        else:
+        return '⚠️'
+    except Exception:
+        try:
+            r = requests.get(f"http://{domain}", timeout=HTTP_TIMEOUT, verify=False)
+            if r.status_code in (200, 301, 302, 403):
+                return '✅'
+            if r.status_code >= 500:
+                return '❌'
             return '⚠️'
-    except:
-        return '❌'
+        except Exception:
+            return '❌'
 
 
 def detect_tech(domain):
     try:
-        resp = requests.get(f"https://{domain}", timeout=3, verify=False)
+        resp = requests.get(f"https://{domain}", timeout=HTTP_TIMEOUT, verify=False)
         server = resp.headers.get('Server', '-')
         powered = resp.headers.get('X-Powered-By', '-')
-        techs = set(filter(lambda t: t.lower() != 'unknown', [server, powered]))
+        techs = set(filter(lambda t: t and t != '-' and t.lower() != 'unknown', [server, powered]))
         return ', '.join(techs) or '-'
-    except:
+    except Exception:
         return '-'
 
 
 def detect_waf(domain):
     try:
-        resp = requests.get(f"https://{domain}", timeout=3, verify=False)
+        resp = requests.get(f"https://{domain}", timeout=HTTP_TIMEOUT, verify=False)
         headers = resp.headers
         cookies = resp.cookies.get_dict()
         if 'cloudflare' in headers.get('Server', '').lower():
@@ -222,7 +268,7 @@ def detect_waf(domain):
             return 'FortiWeb'
         else:
             return '-'
-    except:
+    except Exception:
         return '-'
 
 
@@ -239,7 +285,7 @@ def export_results(output_path, results):
         writer = csv.writer(cf)
         writer.writerow(['IP', 'Domain', 'Ports', 'Alive', 'Tech', 'WAF'])
         for row in results:
-            writer.writerow([row['ip'], row['domain'], row['ports'], row['alive'], row['tech'], row['waf']])
+            writer.writerow([row['ip_plain'], row['domain'], row['ports'], row['alive'], row['tech'], row['waf']])
     with open(txt_path, 'w') as tf:
         for row in results:
             if row['alive'] == '✅':
@@ -256,11 +302,15 @@ def main():
     parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
 
+    # Banner & header
+    print_banner()
+    console.print(f"[bold green][+] Starting at:[/] {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+    console.print("[bold green][+] Target:[/]", args.domain)
+
     domain = args.domain
-    console.print(f"\n[bold green][+] Starting at:[/] {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-    console.print("[bold green][+] Target:[/]", domain)
     start_time = time.time()
 
+    # WHOIS + hosting
     whois_info = get_whois_info(domain)
     ip_host, host_org, host_loc = get_hosting_info(domain)
 
@@ -278,6 +328,7 @@ def main():
     )
     console.print(whois_panel)
 
+    # Subdomain sources
     subdomains = set(get_crtsh_subdomains(domain))
     subdomains.update(get_chaos_subdomains(domain))
 
@@ -294,30 +345,42 @@ def main():
     subdomains.update(f"{s}.{domain}" for s in FALLBACK_SUBS)
     subdomains = sorted(set(s for s in subdomains if not s.startswith("*")))
 
+    # Resolve (fast) & filter unroutable
     results = []
     with Progress() as progress:
-        task = progress.add_task("[cyan]Scanning...", total=len(subdomains))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
-            future_to_sub = {executor.submit(resolve, sub): sub for sub in subdomains}
-            ip_map = {future_to_sub[f]: f.result() for f in concurrent.futures.as_completed(future_to_sub)}
+        task = progress.add_task("[cyan]Scanning...", total=1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=RESOLVE_THREADS) as ex:
+            futs = {ex.submit(resolve, s): s for s in subdomains}
+            ip_map = {}
+            for fut in concurrent.futures.as_completed(futs):
+                sub = futs[fut]
+                try:
+                    ip = fut.result()
+                    if ip:
+                        ip_map[sub] = ip
+                except Exception:
+                    pass
+        progress.update(task, total=len(ip_map))
 
+        # port/tech checks for resolved only
         for sub, ip in sorted(ip_map.items(), key=lambda x: (x[1] or 'zzz', x[0])):
-            progress.update(task, advance=1)
-            if ip:
-                ip_display = f"[red]{ip}[/]" if ip.startswith(('192.', '10.', '172.')) else ip
-                open_ports = scan_ports(ip, full=args.full)
-                alive = check_alive(sub)
-                tech = detect_tech(sub)
-                waf = detect_waf(sub)
-                results.append({
-                    'ip': ip_display,
-                    'domain': sub,
-                    'ports': ', '.join(open_ports) or '-',
-                    'alive': alive,
-                    'tech': tech,
-                    'waf': waf
-                })
+            progress.advance(task)
+            ip_display = f"[red]{ip}[/]" if ip.startswith(('192.', '10.', '172.')) else ip
+            open_ports = scan_ports(ip, full=args.full)
+            alive = check_alive(sub)
+            tech = detect_tech(sub)
+            waf = detect_waf(sub)
+            results.append({
+                'ip': ip_display,
+                'ip_plain': ip,
+                'domain': sub,
+                'ports': ', '.join(open_ports) or '-',
+                'alive': alive,
+                'tech': tech,
+                'waf': waf
+            })
 
+    # Table
     table = Table(title="OpenRecon Summary", box=box.DOUBLE)
     table.add_column("IP")
     table.add_column("Domain")
@@ -331,16 +394,26 @@ def main():
 
     console.print(table)
 
+    # Exports
     if args.output:
+        output_base = os.path.join(args.output, f"{domain}_{datetime.now().strftime('%d.%m.%Y')}")
         export_results(output_base, results)
 
     elapsed = time.time() - start_time
     console.print(f"\n✅ [bold green]Scanning complete in[/] {int(elapsed // 60):02d}:{int(elapsed % 60):02d} ({len(results)}/{len(subdomains)} subdomains processed)")
     console.print("\n[bold yellow]Legend:[/] ✅ alive, ❌ not reachable, ⚠️ unstable; 🔒 valid HTTPS, 🔓 self-signed, ⚠️ insecure HTTP; 🖥️ RDP/SSH, 📁 SMB, 📂 FTP")
 
+
 if __name__ == "__main__":
     try:
+        console.show_cursor(True)
         main()
     except KeyboardInterrupt:
         console.print("[red]\n[!] Interrupted by user")
         sys.exit(0)
+    finally:
+        # гарантированно вернём курсор, даже если rich/progress оборвало
+        try:
+            console.show_cursor(True)
+        except Exception:
+            pass
