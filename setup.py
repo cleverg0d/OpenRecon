@@ -5,7 +5,7 @@ with open("requirements.txt") as f:
 
 setup(
     name='openrecon',
-    version='1.0.1',
+    version='1.0.2',
     author='Stanislav Istyagin (@clevergod)',
     description='🛰️ Asynchronous Reconnaissance Tool for Domain Enumeration and Subdomain Discovery',
     packages=find_packages(),
