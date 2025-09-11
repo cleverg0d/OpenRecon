@@ -1,11 +1,11 @@
-aiohttp
 aiofiles
+aiohttp
 beautifulsoup4
 dnspython
 ipwhois
-tabulate
-termcolor
 requests
 rich
-whois
+tabulate
+termcolor
 urllib3
+python-whois>=0.8.0
